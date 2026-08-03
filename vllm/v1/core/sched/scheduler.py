@@ -499,6 +499,25 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            # Mid-request external KV: connectors that opt in via
+            # supports_mid_request_matching are re-consulted at chunked
+            # continuation boundaries, so externally cached content that
+            # begins mid-prompt can replace compute. The advanced boundary
+            # flows through the existing num_new_tokens computation below.
+            num_external_computed_tokens = 0
+            if (
+                self.connector is not None
+                and request.num_computed_tokens < request.num_prompt_tokens
+                and getattr(self.connector, "supports_mid_request_matching", False)
+            ):
+                ext_tokens, _ext_load_async = self.connector.get_num_new_matched_tokens(
+                    request, request.num_computed_tokens
+                )
+                if ext_tokens:
+                    num_external_computed_tokens = int(ext_tokens)
+                    request.num_external_computed_tokens = num_external_computed_tokens
+                    request.num_computed_tokens += num_external_computed_tokens
+
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
@@ -565,10 +584,15 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        num_external_computed_tokens=num_external_computed_tokens,
                     )
 
                     if new_blocks is not None:
                         # The request can be scheduled.
+                        if num_external_computed_tokens > 0:
+                            self.connector.update_state_after_alloc(
+                                request, new_blocks, num_external_computed_tokens
+                            )
                         break
 
                     # The request cannot be scheduled.
